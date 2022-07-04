@@ -10,6 +10,15 @@ merge_root = "Schwierigkeitsgrade"
 merge_cols = [
     "Schwierigkeitsgrad/Aufgabenbeschreibung/Checkliste", "Unnamed: 4", "Unnamed: 5", "Unnamed: 6"]
 
+# parse the checklist string to a list of strings
+
+
+def parse_checklist(checklist):
+    _checklist = []
+    for item in checklist.split("&#10;"):
+        _checklist.append(item.strip())
+    return _checklist
+
 
 if __name__ == "__main__":
     dfs = pd.read_excel(xl_file, sheet_name=None)
@@ -55,12 +64,12 @@ if __name__ == "__main__":
             head, *tail = row[merge_col]
             # if head is string replace &#10; with :
             if isinstance(head, str):
-                head = head.replace("&#10;", ": ")
+                head, *s = head.split("&#10;")
             else:
                 continue
             print(tail)
             opts = {
-                "Aufgabenbeschreibung": tail[0], "Checkliste": tail[1] if len(tail) > 1 else None}
+                "Aufgabenbeschreibung": tail[0], "Checkliste": parse_checklist(tail[1]) if len(tail) > 1 else None, "hint": s[0] if s != [] else None}
             current_difficulties[head] = opts
         difficulty.append(current_difficulties)
 
