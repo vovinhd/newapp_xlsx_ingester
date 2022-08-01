@@ -1,9 +1,13 @@
 import io
+import os
+import string
 import pandas as pd
 import re
 import argparse
 import warnings
 import json
+from PIL import Image
+from pathlib import Path
 warnings.simplefilter(action='ignore', category=UserWarning)
 xl_file = "./Challenges.xlsx"
 tables_to_ignore = ["Übersicht"]
@@ -14,7 +18,9 @@ merge_cols = [
 tag_col = "Tags"
 drop_cols = ["Themenmonat", "Themenmonat 2"]
 out_file = "text.json"
-
+image_col = "Bild"
+image_base_dir = "./Bilder/"
+image_out_dir = "./images/"
 verbose = False
 # parse the checklist string to a list of strings
 
@@ -32,6 +38,49 @@ def collect_tags(tag_string):
         tags_out.append(tag)
         tags[tag] = tag_text
     return tags_out
+
+
+def find_image(name):
+    print("lookup image: " + name)
+    print(os.listdir(image_base_dir))
+    for file in os.listdir(image_base_dir):
+        if file.startswith(name):
+            return file
+    return None
+
+
+def convert_image(source):
+    destination = Path(image_out_dir + source).with_suffix(".webp")
+    print("opening: " + str(source) + " to: " + str(destination))
+    image = Image.open(image_base_dir + source)  # Open image
+    image.save(destination, format="webp")  # Convert image to webp
+
+    return destination.as_posix(), image.size
+
+
+def make_image_dict(image_string):
+    image_dict = {}
+    image_arr = image_string.split("\n")
+    for source in image_arr:
+        source = source.strip()
+        if source == "":
+            continue
+        if source.startswith("http"):
+            image_dict["url"] = source
+        else:
+
+            path = find_image(source)
+            if path is None:
+                print("Image not found: " + image_base_dir + source)
+                continue
+            else:
+                dest, (x, y) = convert_image(path)
+                image_dict["file"] = {
+                    "path": dest,
+                    "size": {"x": x, "y": y}
+                }
+        # image_dict[image.strip()] = True
+    return image_dict
 
 
 def parse_checklist(checklist):
@@ -70,6 +119,12 @@ def parse_args():
         '-r', '--root', help='root of merge', default=merge_root)
 
     parser.add_argument('-v', '--verbose', help='verbose', action='store_true')
+    parser.add_argument(
+        '-im', '--image', help='image base dir', default=image_base_dir)
+    parser.add_argument('-imd', '--image-dir',
+                        help='image output dir', default=image_out_dir)
+    parser.add_argument('-imc', '--image-col',
+                        help='image column', default=image_col)
     args = parser.parse_args()
     return args
 
@@ -85,7 +140,7 @@ def make_slug(title):
     return re.sub(r"[^a-zA-Z0-9\_]+", "", slug)
 
 
-def parseSheet(name, dataframes) -> pd.DataFrame:
+def parseSheet(name, dataframes, current_topic) -> pd.DataFrame:
     selected_df = dataframes[name]
     selected_df.reset_index()
 
@@ -96,10 +151,10 @@ def parseSheet(name, dataframes) -> pd.DataFrame:
     for index, row in selected_df.iterrows():
         if not pd.isna(row[index_col]):
             current_challenge = index
-            log("Adding challenge:", row[index_col])
+            log("✏ Adding challenge:", row[index_col])
         else:
             if current_challenge == -1:
-                log("No challenge found")
+                # log("Skipping head row:", index)
                 continue
             for merge_col in merge_cols:
 
@@ -114,6 +169,13 @@ def parseSheet(name, dataframes) -> pd.DataFrame:
                         current_val, row[merge_col]]
 
                 selected_df.at[current_challenge, merge_col] = current_val
+
+            image_str = selected_df.at[current_challenge, image_col]
+            log(image_str)
+            if isinstance(image_str, str):
+                log("🖼 Adding image:", image_str)
+                image_data = make_image_dict(image_str)
+                selected_df.at[current_challenge, image_col] = image_data
     selected_df.reset_index()
 
     # drop redundant rows
@@ -123,20 +185,20 @@ def parseSheet(name, dataframes) -> pd.DataFrame:
             selected_df.drop(index, inplace=True)
 
     # create difficulty objects per challenge
-
     selected_df.reset_index()
     difficulty = []
     for index, row in selected_df.iterrows():
         current_difficulties = {}
         for merge_col in merge_cols:
             head, *tail = merge_col, row[merge_col]
-            match head:
-                case "Schwierigkeitsgrad/Aufgabenbeschreibung/Checkliste":
-                    head = "easy"
-                case "Unnamed: 7":
-                    head = "medium"
-                case "Unnamed: 8":
-                    head = "hard"
+            if "Schwierigkeitsgrad/Aufgabenbeschreibung/Checkliste" == head:
+                head = "easy"
+            elif "Unnamed: 7" == head:
+                head = "medium"
+            elif "Unnamed: 8" == head:
+                head = "hard"
+            else:
+                log("Unknown difficulty:", head)
 
             # if head is string replace &#10; with :
             if isinstance(head, str):
@@ -167,16 +229,7 @@ def parseSheet(name, dataframes) -> pd.DataFrame:
 
     # split tag column into array of tags
     for index, row in selected_df.iterrows():
-
         selected_df.at[index, tag_col] = collect_tags(row[tag_col])
-
-    # for index, row in selected_df.iterrows():
-    #     slug = row[index_col]
-    #     slug = list(map(lambda x: x.strip(), slug))
-    #     slug = list(map(lambda x: x.lower(), slug))
-    #     slug = list(map(lambda x:  re.sub(r" ", "_", x), slug))
-    #     log("slug", slug)
-    #     selected_df.at[index, 'slug'] = slug
 
     selected_df.rename(columns={
         'Titel der Challenge ': 'title',
@@ -185,8 +238,15 @@ def parseSheet(name, dataframes) -> pd.DataFrame:
         'Beschreibung': 'frontMatter',  # todo
         'Hintergrundwissen/ Infobytes': 'content',
         'Schwierigkeitsgrade': 'difficulties',
-        'Themenmonat': "topic"
+        'Themenmonat': "topic",
+        'Wiederkehrende Challenge wöchentlich (Ja/Nein)': 'weekly',
+        'Punkte (alte App)': 'points',
+        'Bild': 'image',
+
     }, inplace=True)
+
+    for index, row in selected_df.iterrows():
+        selected_df.at[index, "topic"] = current_topic
 
     selected_df.reset_index()
     return selected_df
@@ -200,11 +260,11 @@ def main():
     for table in dfs.keys():
         if table in tables_to_ignore:  # skip tables that are not challenges
             continue
-        topics[make_slug(table)] = table
-        log("Adding topic:", make_slug(table), table)
-        log("Parsing table:", table)
-        dfs[table] = parseSheet(table, dfs)
-        log("Parsing table:", table, "done")
+        current_topic = make_slug(table)
+        topics[current_topic] = table.strip()
+        log("  Adding topic", table, "as", current_topic)
+        dfs[table] = parseSheet(table, dfs, current_topic)
+        log("✔ topic", table, "done")
     # convert to json
     json_dict = {
         "tags": tags,
