@@ -1,0 +1,10 @@
+{
+    "name": "XLXS Ingester",
+    "type": "python",
+    "request": "launch",
+    "program": "ingest.py",
+    "args": ["v"],
+    "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+    }
+}

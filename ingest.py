@@ -1,6 +1,8 @@
 import io
+from math import fabs
 import os
 import string
+from tkinter import E
 import pandas as pd
 import re
 import argparse
@@ -14,7 +16,7 @@ tables_to_ignore = ["Übersicht"]
 index_col = "Titel der Challenge "
 merge_root = "Schwierigkeitsgrade"
 merge_cols = [
-    "Schwierigkeitsgrad/Aufgabenbeschreibung/Checkliste", "Unnamed: 7", "Unnamed: 8"]
+    "Schwierigkeitsgrad/Aufgabenbeschreibung/Checkliste", "Unnamed: 8", "Unnamed: 9"]
 tag_col = "Tags"
 drop_cols = ["Themenmonat", "Themenmonat 2"]
 out_file = "text.json"
@@ -27,16 +29,64 @@ verbose = False
 tags = {}
 topics = {}
 
+thumbnail_size = 512, 512
+
+
+def make_impact(string):
+    if not isinstance(string, str) or string == "" or string is None or string.lower().startswith("pea"):
+        return "Peanut"
+    return "Big Point"
+
+
+def make_notification_options(options):
+
+    if not isinstance(options, str):
+        log("directly passing option for notification delays", options, type(options))
+        return options
+
+    log("building opts")
+    opts_out = []
+    opts = options.strip().lower().replace(",", "\n").split("\n")
+    log("notification days", opts)
+    for opt in opts:
+        opt = opt.strip()
+        if opt == "":
+            continue
+        opts_out.append(int(opt))
+
+    return opts_out
+
+
+def make_lead(string):
+    if string is str:
+        val = string.strip().lower()
+        return val.startswith("j") or val.startswith("y")
+    return False
+
+
+def make_type(string):
+    if string == "Ja" or string == "ja" or string == "JA":
+        return "recurring"
+    elif string == "Nein" or string == "nein" or string == "NEIN":
+        return "one-time"
+    else:
+        return "repeatable"
+
 
 def collect_tags(tag_string):
-    tags_out = []
 
-    tag_arr = tag_string.split("\n")
+    tags_out = []
+    if not isinstance(tag_string, str) or tag_string == "":
+        return []
+    tag_arr = tag_string.replace("&#xA;", "\n").split("\n")
     for tag in tag_arr:
         tag_text = tag.strip()
         tag = make_slug(tag)
         tags_out.append(tag)
         tags[tag] = tag_text
+
+    # log("tags: " + tags_out)
+
     return tags_out
 
 
@@ -55,12 +105,19 @@ def convert_image(source):
     image = Image.open(image_base_dir + source)  # Open image
     image.save(destination, format="webp")  # Convert image to webp
 
-    return destination.as_posix(), image.size
+    # make thumnails
+    image.thumbnail(thumbnail_size, Image.Resampling.LANCZOS)
+    thumb_destination = Path(
+        image_out_dir + "thumbs/" + source).with_suffix(".webp")
+
+    image.save(thumb_destination, format="webp")
+
+    return destination.as_posix(), image.size, thumb_destination.as_posix()
 
 
 def make_image_dict(image_string):
     image_dict = {}
-    image_arr = image_string.split("\n")
+    image_arr = image_string.replace('&#xA;', '\n').split("\n")
     for source in image_arr:
         source = source.strip()
         if source == "":
@@ -74,10 +131,13 @@ def make_image_dict(image_string):
                 print("Image not found: " + image_base_dir + source)
                 continue
             else:
-                dest, (x, y) = convert_image(path)
+                dest, (x, y), thumb = convert_image(path)
                 image_dict["file"] = {
                     "path": dest,
                     "size": {"x": x, "y": y}
+                }
+                image_dict["thumb"] = {
+                    "path": thumb,
                 }
         # image_dict[image.strip()] = True
     return image_dict
@@ -85,7 +145,9 @@ def make_image_dict(image_string):
 
 def parse_checklist(checklist):
     _checklist = []
-    for item in re.split("&#10;|\n", checklist):
+    if not isinstance(checklist, str):
+        return _checklist
+    for item in re.split("&#xA;|&#10;|\n", checklist):
         todo = item
         todo = re.sub(r"\*", " ", todo)
         todo = todo.strip()
@@ -131,6 +193,8 @@ def parse_args():
 
 def make_slug(title):
     slug = title.lower().strip()
+    slug = re.sub("\s\(sebastian\)", "", slug)
+    slug = slug.strip()
     slug = re.sub(r" ", "_", slug)
     # replace umlaute in slug
     slug = re.sub(r"ä", "ae", slug)
@@ -187,15 +251,16 @@ def parseSheet(name, dataframes, current_topic) -> pd.DataFrame:
     # create difficulty objects per challenge
     selected_df.reset_index()
     difficulty = []
+
     for index, row in selected_df.iterrows():
         current_difficulties = {}
         for merge_col in merge_cols:
             head, *tail = merge_col, row[merge_col]
             if "Schwierigkeitsgrad/Aufgabenbeschreibung/Checkliste" == head:
                 head = "easy"
-            elif "Unnamed: 7" == head:
-                head = "medium"
             elif "Unnamed: 8" == head:
+                head = "medium"
+            elif "Unnamed: 9" == head:
                 head = "hard"
             else:
                 log("Unknown difficulty:", head)
@@ -208,7 +273,8 @@ def parseSheet(name, dataframes, current_topic) -> pd.DataFrame:
                 continue
 
             tail = tail[0]
-            if not isinstance(tail[0], str):
+            print(tail)
+            if isinstance(tail, (float, str)) or not isinstance(tail[0], str):
                 continue
             opts = {
                 "taskDescription": tail[0],
@@ -239,14 +305,44 @@ def parseSheet(name, dataframes, current_topic) -> pd.DataFrame:
         'Hintergrundwissen/ Infobytes': 'content',
         'Schwierigkeitsgrade': 'difficulties',
         'Themenmonat': "topic",
-        'Wiederkehrende Challenge wöchentlich (Ja/Nein)': 'weekly',
+        'Wiederkehrende Challenge wöchentlich (Ja/Nein)': 'type',
         'Punkte (alte App)': 'points',
         'Bild': 'image',
+        'Notification-Text': 'notification',
+        'Nach Annahme der Challenge soll erinnert werden in...Tagen': 'notificationDays',
+        'Lead (j/n)': 'lead',
+
 
     }, inplace=True)
 
     for index, row in selected_df.iterrows():
         selected_df.at[index, "topic"] = current_topic
+
+    selected_df.reset_index()
+
+    for index, row in selected_df.iterrows():
+        try:
+            selected_df.at[index, "type"] = make_type(row["type"])
+        except Exception as e:
+            log(e)
+
+    selected_df.reset_index()
+
+    for index, row in selected_df.iterrows():
+        selected_df.at[index, "lead"] = make_lead(row["lead"])
+
+    selected_df.reset_index()
+
+    if "notificationDays" in selected_df.columns:
+        for index, row in selected_df.iterrows():
+            selected_df.at[index, "notificationDays"] = make_notification_options(
+                row["notificationDays"])
+
+    selected_df.reset_index()
+
+    for index, row in selected_df.iterrows():
+        selected_df.at[index, "impact"] = make_impact(
+            row["impact"])
 
     selected_df.reset_index()
     return selected_df
@@ -261,7 +357,7 @@ def main():
         if table in tables_to_ignore:  # skip tables that are not challenges
             continue
         current_topic = make_slug(table)
-        topics[current_topic] = table.strip()
+        topics[current_topic] = table.strip().replace("&amp;", "&")
         log("  Adding topic", table, "as", current_topic)
         dfs[table] = parseSheet(table, dfs, current_topic)
         log("✔ topic", table, "done")
@@ -288,6 +384,7 @@ def main():
     out = json.dumps(json_dict, indent=4, ensure_ascii=False)
     out = re.sub(r'\\/', '/', out)
     out = re.sub(r'NaN', '\"\"', out)
+    out = re.sub(r'&#xA;', '', out)
 
     # write to file
     with io.open(out_file, mode="w", encoding="UTF8") as fd:
